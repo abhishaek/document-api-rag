@@ -1,0 +1,40 @@
+# Local development stack: the API + MongoDB Atlas Local.
+#
+# Atlas Local (mongodb/mongodb-atlas-local) is used instead of the plain `mongo`
+# image because it supports Atlas Search / $vectorSearch, which RAG retrieval
+# needs. The plain community image cannot do vector search.
+services:
+  mongodb:
+    image: mongodb/mongodb-atlas-local:latest
+    ports:
+      # Host 27018 -> container 27017. Avoids colliding with a host MongoDB on
+      # 27017. The api service below still uses the internal port 27017.
+      - "27018:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      # Inside the compose network, reach Mongo by its service name.
+      MONGODB_URI: mongodb://mongodb:27017/?directConnection=true
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mongodb_data:

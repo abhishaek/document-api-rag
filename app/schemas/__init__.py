@@ -1,0 +1,17 @@
+"""Pydantic request/response schemas.
+
+Re-exported here so callers can use ``from app.schemas import HealthResponse``
+instead of reaching into each submodule. Add new schema modules and re-export
+their public models below.
+"""
+
+from app.schemas.auth import CreateUserRequest, UserResponse, UserRole
+from app.schemas.health import HealthResponse, ReadinessResponse
+
+__all__ = [
+    "HealthResponse",
+    "ReadinessResponse",
+    "CreateUserRequest",
+    "UserResponse",
+    "UserRole",
+]

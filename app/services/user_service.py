@@ -8,6 +8,8 @@ primitives in ``app.core.security``.
 import logging
 from datetime import UTC, datetime
 
+from bson import ObjectId
+from bson.errors import InvalidId
 from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.errors import DuplicateKeyError
 
@@ -62,3 +64,17 @@ async def create_user(db: AsyncDatabase, payload: CreateUserRequest) -> UserResp
         role=payload.role,
         is_active=True,
     )
+
+
+async def get_user_by_id(db: AsyncDatabase, user_id: str) -> dict | None:
+    """Fetch a user document by its string id.
+
+    The id we carry around is the stringified form of Mongo's ObjectId ``_id``,
+    so we convert it back to query. A string that isn't a valid ObjectId can
+    never match a real user, so we return ``None`` rather than raising.
+    """
+    try:
+        oid = ObjectId(user_id)
+    except (InvalidId, TypeError):
+        return None
+    return await db[COLLECTION_NAME].find_one({"_id": oid})

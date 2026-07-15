@@ -6,6 +6,19 @@ client and in-memory fake database from conftest.py.
 """
 
 REGISTER_URL = "/v1/auth/register"
+LOGIN_URL = "/v1/auth/login"
+REFRESH_URL = "/v1/auth/refresh"
+LOGOUT_URL = "/v1/auth/logout"
+
+
+async def register_and_login(client) -> dict:
+    """Register the default user and log in, returning the token payload."""
+    await client.post(REGISTER_URL, json=valid_payload())
+    response = await client.post(
+        LOGIN_URL, data={"username": "alice", "password": "supersecret"}
+    )
+    assert response.status_code == 200
+    return response.json()
 
 
 def valid_payload(**overrides) -> dict:
@@ -110,3 +123,152 @@ async def test_register_returns_422_on_missing_fields(client):
     response = await client.post(REGISTER_URL, json={"email": "a@example.com"})
 
     assert response.status_code == 422
+
+
+# --- POST /v1/auth/login (OAuth2 form: username + password) ---
+
+
+async def test_login_returns_tokens_on_valid_credentials(client):
+    await client.post(REGISTER_URL, json=valid_payload())
+
+    response = await client.post(
+        LOGIN_URL, data={"username": "alice", "password": "supersecret"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token_type"] == "bearer"
+    assert body["access_token"]
+    assert body["refresh_token"]
+
+
+async def test_login_returns_401_on_wrong_password(client):
+    await client.post(REGISTER_URL, json=valid_payload())
+
+    response = await client.post(
+        LOGIN_URL, data={"username": "alice", "password": "wrongpass"}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_login_returns_401_on_unknown_user(client):
+    response = await client.post(
+        LOGIN_URL, data={"username": "ghost", "password": "whatever"}
+    )
+
+    assert response.status_code == 401
+
+
+# --- POST /v1/auth/refresh ---
+
+
+async def test_refresh_returns_new_tokens(client):
+    tokens = await register_and_login(client)
+
+    response = await client.post(
+        REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["access_token"]
+    assert body["refresh_token"]
+    # Rotation: the new refresh token differs from the one we sent.
+    assert body["refresh_token"] != tokens["refresh_token"]
+
+
+async def test_refresh_invalidates_old_token(client):
+    tokens = await register_and_login(client)
+
+    # First refresh succeeds and rotates the token...
+    await client.post(REFRESH_URL, json={"refresh_token": tokens["refresh_token"]})
+    # ...so reusing the original refresh token now fails.
+    second = await client.post(
+        REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
+    )
+
+    assert second.status_code == 401
+
+
+async def test_refresh_returns_401_on_unknown_token(client):
+    response = await client.post(
+        REFRESH_URL, json={"refresh_token": "not-a-real-token"}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_refresh_rejected_after_user_deactivated(client, fake_db):
+    from app.models.user import COLLECTION_NAME as USERS_COLLECTION
+
+    tokens = await register_and_login(client)
+
+    # Simulate the account being deactivated after the token was issued.
+    for doc in fake_db[USERS_COLLECTION].docs:
+        doc["is_active"] = False
+
+    response = await client.post(
+        REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
+    )
+    assert response.status_code == 401
+
+    # The refresh token was also revoked, so a retry still fails (no infinite
+    # refresh loop for a disabled account).
+    retry = await client.post(
+        REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
+    )
+    assert retry.status_code == 401
+
+
+# --- POST /v1/auth/logout ---
+
+
+async def test_logout_revokes_refresh_token(client):
+    tokens = await register_and_login(client)
+    auth_header = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    response = await client.post(
+        LOGOUT_URL,
+        json={"refresh_token": tokens["refresh_token"]},
+        headers=auth_header,
+    )
+
+    assert response.status_code == 204
+    # The refresh token is gone: it can no longer be exchanged.
+    refresh = await client.post(
+        REFRESH_URL, json={"refresh_token": tokens["refresh_token"]}
+    )
+    assert refresh.status_code == 401
+
+
+async def test_logout_requires_authentication(client):
+    tokens = await register_and_login(client)
+
+    # No Authorization header → the UserDependency rejects the request.
+    response = await client.post(
+        LOGOUT_URL, json={"refresh_token": tokens["refresh_token"]}
+    )
+
+    assert response.status_code == 401
+
+
+async def test_logout_revokes_access_token_immediately(client):
+    tokens = await register_and_login(client)
+    auth_header = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    logout = await client.post(
+        LOGOUT_URL,
+        json={"refresh_token": tokens["refresh_token"]},
+        headers=auth_header,
+    )
+    assert logout.status_code == 204
+
+    # The same access token is now denylisted: reusing it on a protected route
+    # (logout itself) is rejected before the handler runs.
+    reused = await client.post(
+        LOGOUT_URL,
+        json={"refresh_token": "anything"},
+        headers=auth_header,
+    )
+    assert reused.status_code == 401

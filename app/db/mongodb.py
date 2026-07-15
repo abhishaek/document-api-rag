@@ -24,6 +24,8 @@ from pymongo import AsyncMongoClient
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.core.config import Settings
+from app.models import refresh_token as refresh_token_model
+from app.models import revoked_token as revoked_token_model
 from app.models import user as user_model
 
 logger = logging.getLogger(__name__)
@@ -56,25 +58,45 @@ async def connect_to_mongo(settings: Settings) -> None:
     await _ensure_schema()
 
 
+async def _ensure_collection(
+    db: AsyncDatabase,
+    name: str,
+    validator: dict,
+    indexes: list[tuple[str, dict]],
+) -> None:
+    """Apply a collection's $jsonSchema validator and indexes. Creates the
+    collection with the validator if missing, otherwise updates it via collMod.
+    Idempotent."""
+    existing = await db.list_collection_names()
+    if name not in existing:
+        await db.create_collection(name, validator=validator)
+    else:
+        await db.command("collMod", name, validator=validator)
+    for field, options in indexes:
+        await db[name].create_index(field, **options)
+
+
 async def _ensure_schema() -> None:
-    """Apply DB-level schema: the JSON schema validator and indexes for each
-    collection. Idempotent — safe to run on every startup."""
+    """Apply DB-level schema (validators + indexes) for every collection.
+    Idempotent — safe to run on every startup."""
     db = _state.database
     assert db is not None
 
-    # users collection: apply the $jsonSchema validator (create the collection
-    # with it if missing, otherwise update it via collMod), then its indexes.
-    existing = await db.list_collection_names()
-    if user_model.COLLECTION_NAME not in existing:
-        await db.create_collection(
-            user_model.COLLECTION_NAME, validator=user_model.USERS_VALIDATOR
-        )
-    else:
-        await db.command(
-            "collMod", user_model.COLLECTION_NAME, validator=user_model.USERS_VALIDATOR
-        )
-    for field, options in user_model.USERS_INDEXES:
-        await db[user_model.COLLECTION_NAME].create_index(field, **options)
+    await _ensure_collection(
+        db, user_model.COLLECTION_NAME, user_model.USERS_VALIDATOR, user_model.USERS_INDEXES
+    )
+    await _ensure_collection(
+        db,
+        refresh_token_model.COLLECTION_NAME,
+        refresh_token_model.REFRESH_TOKENS_VALIDATOR,
+        refresh_token_model.REFRESH_TOKENS_INDEXES,
+    )
+    await _ensure_collection(
+        db,
+        revoked_token_model.COLLECTION_NAME,
+        revoked_token_model.REVOKED_TOKENS_VALIDATOR,
+        revoked_token_model.REVOKED_TOKENS_INDEXES,
+    )
 
     logger.info("ensured mongodb schema and indexes")
 

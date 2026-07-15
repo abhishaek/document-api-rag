@@ -9,7 +9,9 @@ dependencies = [
     "fastapi>=0.139.0",
     "pydantic-settings>=2.14.2",
     "pydantic[email]>=2.13.4",
+    "pyjwt>=2.10.1",
     "pymongo>=4.17.0",
+    "python-multipart>=0.0.20",
     "slowapi>=0.1.10",
     "uvicorn[standard]>=0.51.0",
 ]

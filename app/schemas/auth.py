@@ -26,3 +26,13 @@ class UserResponse(BaseModel):
     username: str
     role: UserRole
     is_active: bool
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    refresh_token: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str

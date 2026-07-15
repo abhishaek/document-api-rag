@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27018/?directConnection=true"
     mongodb_db_name: str = "document_rag"
 
+    # --- Auth / JWT ---
+    # SECRET_KEY is required from the environment (no default) so a real secret
+    # is never committed. Generate one with:  openssl rand -hex 32
+    secret_key: str
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+
     # --- Logging ---
     # LOG_LEVEL: DEBUG | INFO | WARNING | ERROR | CRITICAL
     # LOG_JSON: true in production (structured logs), false for readable dev logs.

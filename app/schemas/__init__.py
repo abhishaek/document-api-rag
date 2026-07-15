@@ -5,7 +5,7 @@ instead of reaching into each submodule. Add new schema modules and re-export
 their public models below.
 """
 
-from app.schemas.auth import CreateUserRequest, UserResponse, UserRole
+from app.schemas.auth import CreateUserRequest, RefreshRequest, Token, UserResponse, UserRole
 from app.schemas.health import HealthResponse, ReadinessResponse
 
 __all__ = [
@@ -14,4 +14,6 @@ __all__ = [
     "CreateUserRequest",
     "UserResponse",
     "UserRole",
+    "RefreshRequest",
+    "Token"
 ]

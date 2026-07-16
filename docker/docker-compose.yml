@@ -6,12 +6,27 @@
 services:
   mongodb:
     image: mongodb/mongodb-atlas-local:latest
+    # Atlas Local initializes its replica set against the container's hostname,
+    # which Docker defaults to the random container ID, and bakes that into the
+    # stored RS config (both the set name and the member host). Compose gives a
+    # recreated container a new ID, so without pinning this, `db-down` +
+    # `db-up` leaves the persisted config pointing at a host that no longer
+    # exists and mongod reports InvalidReplicaSetConfig. A fixed hostname keeps
+    # the stored config valid across recreation.
+    hostname: mongodb
     ports:
       # Host 27018 -> container 27017. Avoids colliding with a host MongoDB on
       # 27017. The api service below still uses the internal port 27017.
       - "27018:27017"
     volumes:
       - mongodb_data:/data/db
+      # /data/configdb holds the replica-set keyfile that Atlas Local generates
+      # on first init. The image declares it as a volume, so without naming it
+      # here each new container gets a fresh empty one — while mongodb_data keeps
+      # a data dir that was initialized *with* a keyfile. mongod then fails with
+      # "Unable to acquire security key[s]" and restart-loops forever. Naming it
+      # keeps the keyfile and the data it belongs to in sync across down/up.
+      - mongodb_config:/data/configdb
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 10s
@@ -38,3 +53,4 @@ services:
 
 volumes:
   mongodb_data:
+  mongodb_config:

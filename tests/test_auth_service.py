@@ -8,11 +8,15 @@ import pytest
 from app.core.config import get_settings
 from app.core.security import hash_password
 from app.models.refresh_token import COLLECTION_NAME as REFRESH_COLLECTION
+from app.models.revoked_token import COLLECTION_NAME as REVOKED_COLLECTION
 from app.services.auth_service import (
     _hash_token,
     authenticate_user,
     create_access_token,
     create_refresh_token,
+    is_access_token_revoked,
+    revoke_access_token,
+    revoke_refresh_token,
     rotate_refresh_token,
     verify_refresh_token,
 )
@@ -160,3 +164,51 @@ async def test_rotate_refresh_token_invalidates_old_and_issues_new(fake_db):
     assert await verify_refresh_token(new_raw, fake_db) is not None
     # Exactly one active token remains for the user.
     assert len(fake_db[REFRESH_COLLECTION].docs) == 1
+
+
+@pytest.mark.asyncio
+async def test_revoke_refresh_token_deletes_it(fake_db):
+    raw = await create_refresh_token("user123", fake_db)
+
+    await revoke_refresh_token(raw, fake_db)
+
+    assert await verify_refresh_token(raw, fake_db) is None
+    assert fake_db[REFRESH_COLLECTION].docs == []
+
+
+@pytest.mark.asyncio
+async def test_revoke_refresh_token_is_a_noop_for_an_unknown_token(fake_db):
+    """Logging out with a token that was never issued must not raise."""
+    await revoke_refresh_token("never-issued-token", fake_db)
+
+
+@pytest.mark.asyncio
+async def test_revoke_access_token_adds_jti_to_the_denylist(fake_db):
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+
+    assert await is_access_token_revoked("jti-abc", fake_db) is False
+    await revoke_access_token("jti-abc", expires_at, fake_db)
+    assert await is_access_token_revoked("jti-abc", fake_db) is True
+
+
+@pytest.mark.asyncio
+async def test_revoke_access_token_is_idempotent(fake_db):
+    """Revoking the same jti twice hits the unique index on revoked_tokens.jti;
+    the DuplicateKeyError is swallowed so a double logout is not a 500."""
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+
+    await revoke_access_token("jti-abc", expires_at, fake_db)
+    await revoke_access_token("jti-abc", expires_at, fake_db)
+
+    assert len(fake_db[REVOKED_COLLECTION].docs) == 1
+
+
+@pytest.mark.asyncio
+async def test_revoke_access_token_stores_the_tokens_own_expiry(fake_db):
+    """expires_at drives the TTL cleanup, so the denylist entry must expire when
+    the token would have expired anyway — not sooner, not never."""
+    expires_at = datetime.now(UTC) + timedelta(minutes=15)
+
+    await revoke_access_token("jti-abc", expires_at, fake_db)
+
+    assert fake_db[REVOKED_COLLECTION].docs[0]["expires_at"] == expires_at

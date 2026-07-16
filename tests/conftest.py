@@ -71,8 +71,10 @@ class FakeCollection:
     async def insert_one(self, document: dict):
         # Emulate the unique indexes only for fields the document actually has,
         # so collections without email/username (e.g. refresh_tokens) work too.
+        # Mirrors the real indexes: users.email, users.username,
+        # refresh_tokens.token_hash, revoked_tokens.jti.
         for existing in self.docs:
-            for field in ("email", "username", "token_hash"):
+            for field in ("email", "username", "token_hash", "jti"):
                 if field in document and existing.get(field) == document[field]:
                     raise DuplicateKeyError(
                         "E11000 duplicate key error",

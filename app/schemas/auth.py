@@ -1,8 +1,9 @@
 """Auth request/response schemas."""
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, StringConstraints
 
 
 class UserRole(StrEnum):
@@ -14,7 +15,13 @@ class UserRole(StrEnum):
 
 class CreateUserRequest(BaseModel):
     email: EmailStr
-    username: str = Field(min_length=3, max_length=50)
+    # Usernames are deliberately case-sensitive: "Abhi" and "abhi" are distinct
+    # accounts. Surrounding whitespace is stripped, though — it renders
+    # identically to none at all, so it can only ever be a typo. Length is
+    # checked after stripping.
+    username: Annotated[
+        str, StringConstraints(min_length=3, max_length=50, strip_whitespace=True)
+    ]
     password: str = Field(min_length=8, max_length=128)
     role: UserRole = UserRole.user
 

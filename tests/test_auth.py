@@ -105,6 +105,38 @@ async def test_register_returns_422_on_short_username(client):
     assert response.status_code == 422
 
 
+async def test_register_strips_surrounding_whitespace_from_username(client):
+    response = await client.post(REGISTER_URL, json=valid_payload(username="  alice  "))
+
+    assert response.status_code == 201
+    assert response.json()["username"] == "alice"
+
+
+async def test_register_checks_username_length_after_stripping(client):
+    """"  ab  " is 6 characters as sent but 2 once stripped, so it must fail the
+    3-character minimum rather than sneak past it."""
+    response = await client.post(REGISTER_URL, json=valid_payload(username="  ab  "))
+
+    assert response.status_code == 422
+
+
+async def test_register_usernames_are_case_sensitive(client):
+    """Deliberate: "Abhi" and "abhi" are distinct accounts. Contrast with email,
+    which is normalized to lowercase — the two fields differ on purpose."""
+    first = await client.post(
+        REGISTER_URL, json=valid_payload(username="Abhi", email="a@example.com")
+    )
+    second = await client.post(
+        REGISTER_URL, json=valid_payload(username="abhi", email="b@example.com")
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["username"] == "Abhi"
+    assert second.json()["username"] == "abhi"
+    assert first.json()["id"] != second.json()["id"]
+
+
 async def test_register_returns_422_on_short_password(client):
     response = await client.post(REGISTER_URL, json=valid_payload(password="short"))
 

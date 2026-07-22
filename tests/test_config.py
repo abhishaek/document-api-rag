@@ -6,6 +6,8 @@ These tests construct ``Settings`` directly (rather than the cached
 developer files.
 """
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -47,6 +49,55 @@ def test_jwt_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch):
 def test_secret_key_is_required(monkeypatch: pytest.MonkeyPatch):
     """With no SECRET_KEY in the environment, settings fail fast at startup."""
     monkeypatch.delenv("SECRET_KEY", raising=False)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_storage_defaults(monkeypatch: pytest.MonkeyPatch):
+    """Storage knobs have working defaults, so the app boots without them set."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    for var in ("STORAGE_DIR", "MAX_UPLOAD_SIZE_BYTES"):
+        monkeypatch.delenv(var, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.storage_dir == Path("./var/storage")
+    assert settings.max_upload_size_bytes == 25 * 1024 * 1024
+
+
+def test_storage_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch):
+    """STORAGE_DIR is coerced to a Path and the size cap to an int."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.setenv("STORAGE_DIR", "/srv/blobs")
+    monkeypatch.setenv("MAX_UPLOAD_SIZE_BYTES", "1048576")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.storage_dir == Path("/srv/blobs")
+    assert settings.max_upload_size_bytes == 1048576
+
+
+def test_chunking_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
+    """Chunk size/overlap default sensibly and read from the environment."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    for var in ("CHUNK_SIZE", "CHUNK_OVERLAP"):
+        monkeypatch.delenv(var, raising=False)
+    assert Settings(_env_file=None).chunk_size == 2000
+    assert Settings(_env_file=None).chunk_overlap == 200
+
+    monkeypatch.setenv("CHUNK_SIZE", "1500")
+    monkeypatch.setenv("CHUNK_OVERLAP", "150")
+    settings = Settings(_env_file=None)
+    assert settings.chunk_size == 1500
+    assert settings.chunk_overlap == 150
+
+
+def test_chunk_overlap_must_be_smaller_than_size(monkeypatch: pytest.MonkeyPatch):
+    """A misconfigured overlap >= size fails fast at startup, not mid-ingestion."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.setenv("CHUNK_SIZE", "500")
+    monkeypatch.setenv("CHUNK_OVERLAP", "500")
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)

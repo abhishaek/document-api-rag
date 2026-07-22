@@ -24,3 +24,6 @@ dist/
 build/
 htmlcov/
 .coverage
+
+# Uploaded document blobs (filesystem storage backend)
+var/

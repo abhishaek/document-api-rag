@@ -1,6 +1,6 @@
 """Tests for get_current_user (app/dependencies.py).
 
-get_current_user gates every authenticated request and rejects for five distinct
+get_current_user gates every authenticated request and rejects for six distinct
 reasons, each with its own message. The auth-route tests cover only the
 missing-header case, so these exercise the remaining branches directly by
 signing tokens with the app's real secret and varying one thing at a time.
@@ -95,3 +95,16 @@ async def test_token_missing_id_claim_is_rejected(client):
     response = await _logout_with(client, _token(id=None))
 
     assert response.status_code == 401
+
+
+async def test_token_with_unparseable_id_claim_is_rejected(client):
+    """A present-but-malformed id must be rejected here, not downstream.
+
+    Services convert the claim to an ObjectId without re-checking it, so a claim
+    that cannot parse would otherwise raise InvalidId from inside a query and
+    surface as a 500. The credential is what's wrong, so it belongs in the 401.
+    """
+    response = await _logout_with(client, _token(id="not-an-objectid"))
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Could not validate credentials."

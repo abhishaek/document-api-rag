@@ -181,10 +181,15 @@ class FakeEmbedder:
     def __init__(self, dimensions: int = 8) -> None:
         self.dimensions = dimensions
         self.calls: list[list[str]] = []
+        self.query_calls: list[str] = []
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         self.calls.append(list(texts))
         return [[float(len(t))] * self.dimensions for t in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        self.query_calls.append(text)
+        return [float(len(text))] * self.dimensions
 
 
 @pytest.fixture

@@ -16,6 +16,7 @@ or run the app and browse ``/docs`` for the live, per-tag list):
     /health, /ready   app/routers/health.py      Liveness / readiness probes
     /v1/auth/*        app/routers/auth.py        Register, login, refresh, logout
     /v1/documents/*   app/routers/documents.py   Upload, list, fetch documents
+    /v1/search        app/routers/search.py      Vector search over own chunks
 
 Keep this table at the domain level (one row per router), not per-endpoint — a
 per-endpoint list would drift out of sync, whereas ``/docs`` already is the
@@ -28,7 +29,7 @@ never changes.
 
 from fastapi import APIRouter
 
-from app.routers import auth, documents, health
+from app.routers import auth, documents, health, search
 
 # --- Unversioned operational endpoints ---
 root_router = APIRouter()
@@ -38,6 +39,5 @@ root_router.include_router(health.router)
 # auth.router already carries its own "/auth" prefix, so it becomes /v1/auth/...
 api_router = APIRouter(prefix="/v1")
 api_router.include_router(auth.router)
-# api_router.include_router(summary.router)       # -> /v1/summary/...
 api_router.include_router(documents.router)     # -> /v1/documents/...
-# api_router.include_router(retrieval.router)     # -> /v1/retrieval/...
+api_router.include_router(search.router)        # -> /v1/search

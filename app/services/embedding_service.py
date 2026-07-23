@@ -49,6 +49,8 @@ class Embedder(Protocol):
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
 
+    async def embed_query(self, text: str) -> list[float]: ...
+
 
 def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // _CHARS_PER_TOKEN)
@@ -124,6 +126,18 @@ class VoyageEmbedder:
         )
         return result.embeddings
 
+    def _embed_query_sync(self, text: str) -> list[float]:
+        # input_type="query" pairs with the "document" type used at ingest:
+        # Voyage embeds both into the same space but optimises each side
+        # differently, so a query must be embedded as a query to match its chunks.
+        result = self._get_client().embed(
+            [text],
+            model=self._model,
+            input_type="query",
+            output_dimension=self._dimensions,
+        )
+        return result.embeddings[0]
+
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
@@ -147,3 +161,12 @@ class VoyageEmbedder:
                 f"Expected {len(texts)} embeddings, got {len(embeddings)}"
             )
         return embeddings
+
+    async def embed_query(self, text: str) -> list[float]:
+        try:
+            # Network-bound sync SDK call, off the event loop like embed_documents.
+            return await asyncio.to_thread(self._embed_query_sync, text)
+        except Exception as exc:
+            # Same normalisation as embed_documents: auth/rate-limit/network
+            # failures surface as one domain error the caller can map to a 5xx.
+            raise EmbeddingError(f"Voyage query embedding failed: {exc}") from exc

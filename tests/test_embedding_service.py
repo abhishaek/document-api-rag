@@ -82,6 +82,31 @@ def test_client_is_built_with_retries_and_timeout(monkeypatch):
     assert captured["api_key"] == "k"
 
 
+async def test_embed_query_uses_query_input_type():
+    """A query must be embedded with input_type="query" so it lands in the same
+    space as the "document"-embedded chunks it will be matched against."""
+    client = _FakeVoyageClient()
+    embedder = _embedder_with(client, dim=4)
+
+    vector = await embedder.embed_query("what is the refund policy?")
+
+    assert len(vector) == 4
+    assert client.calls[0]["input_type"] == "query"
+    assert client.calls[0]["model"] == "voyage-4-large"
+    assert client.calls[0]["output_dimension"] == 4
+
+
+async def test_embed_query_wraps_backend_exception():
+    class _BoomClient(_FakeVoyageClient):
+        def embed(self, texts, **kwargs):
+            raise RuntimeError("429 rate limit")
+
+    embedder = _embedder_with(_BoomClient())
+
+    with pytest.raises(EmbeddingError, match="Voyage query embedding failed"):
+        await embedder.embed_query("anything")
+
+
 async def test_empty_input_makes_no_api_call():
     client = _FakeVoyageClient()
     embedder = _embedder_with(client)

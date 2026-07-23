@@ -15,6 +15,7 @@ from app.schemas.auth import (
 from app.schemas.common import ResponseMetadata
 from app.schemas.document import DocumentResponse, DocumentStatus
 from app.schemas.health import HealthResponse, ReadinessResponse
+from app.schemas.search import SearchRequest, SearchResponse, SearchResult
 
 __all__ = [
     "HealthResponse",
@@ -27,4 +28,7 @@ __all__ = [
     "ResponseMetadata",
     "DocumentResponse",
     "DocumentStatus",
+    "SearchRequest",
+    "SearchResponse",
+    "SearchResult",
 ]

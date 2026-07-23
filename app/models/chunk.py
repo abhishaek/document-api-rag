@@ -59,6 +59,17 @@ def build_vector_index_definition(dimensions: int, similarity: str = "cosine") -
     match on *meaning* regardless of vector length — the right default for text
     embeddings. ``numDimensions`` must equal the embedding width the model emits
     (1024 for voyage-4-large); a mismatch makes every query fail.
+
+    The ``filter`` fields let ``$vectorSearch`` scope a query *inside* the ANN
+    search. ``$vectorSearch`` can only pre-filter on fields declared here, so both
+    scoping needs must be declared:
+
+    * ``user_id`` — tenant isolation. Without it, scoping to one user would need a
+      post-filter that runs after ``limit`` has already been applied, silently
+      dropping a user's own results.
+    * ``document_id`` — lets a caller restrict a search to a single document
+      (``POST /v1/search`` with a ``document_id``). Same reason it must be a
+      declared filter field rather than a post-filter.
     """
     return {
         "fields": [
@@ -67,7 +78,15 @@ def build_vector_index_definition(dimensions: int, similarity: str = "cosine") -
                 "path": "embedding",
                 "numDimensions": dimensions,
                 "similarity": similarity,
-            }
+            },
+            {
+                "type": "filter",
+                "path": "user_id",
+            },
+            {
+                "type": "filter",
+                "path": "document_id",
+            },
         ]
     }
 

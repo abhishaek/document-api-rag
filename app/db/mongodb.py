@@ -18,6 +18,7 @@ Route handlers get the database via the ``get_database`` dependency:
         return await db.things.find().to_list(length=100)
 """
 
+import asyncio
 import logging
 
 from pymongo import AsyncMongoClient
@@ -88,37 +89,100 @@ async def _ensure_collection(
         await db[name].create_index(field, **options)
 
 
+def _vector_index_matches(existing_def: dict | None, desired_def: dict) -> bool:
+    """Whether an existing vector index definition already matches the desired one.
+
+    Compared on the parts that actually change search behaviour: each field's
+    role (``type``) and ``path``, plus the vector field's ``numDimensions`` and
+    ``similarity``. Extra keys Atlas may echo back with its own defaults are
+    ignored deliberately — otherwise a matching index would look "drifted" and be
+    rebuilt on every startup. A change we *do* care about (a filter field added or
+    removed, the dimension or similarity changed) alters this set and is caught.
+    """
+
+    def field_key(field: dict):
+        base = (field.get("type"), field.get("path"))
+        if field.get("type") == "vector":
+            return base + (field.get("numDimensions"), field.get("similarity"))
+        return base
+
+    existing_fields = (existing_def or {}).get("fields", [])
+    desired_fields = desired_def.get("fields", [])
+    return {field_key(f) for f in existing_fields} == {
+        field_key(f) for f in desired_fields
+    }
+
+
+async def _wait_until_search_index_absent(
+    collection, name: str, *, attempts: int = 30, delay: float = 1.0
+) -> None:
+    """Poll until a just-dropped search index is gone, so it can be recreated.
+
+    A drop is asynchronous on Atlas; recreating under the same name before the
+    drop settles is rejected. Bounded so a drop that never completes can't hang
+    startup — after the budget we fall through and let the recreate attempt (and
+    fail into the best-effort handler) rather than block forever.
+    """
+    for _ in range(attempts):
+        cursor = await collection.list_search_indexes()
+        if name not in {idx["name"] async for idx in cursor}:
+            return
+        await asyncio.sleep(delay)
+
+
 async def _ensure_vector_index(db: AsyncDatabase) -> None:
-    """Create the chunks vector search index if it is missing.
+    """Create *or update* the chunks vector search index so it matches the code.
 
     Best-effort: the Atlas Search index API only exists on Atlas (Cloud or the
     Atlas Local Docker image). On a server without it this logs a warning and
     returns rather than failing startup — the app still ingests and stores chunks;
     only vector *search* is unavailable until the index exists.
 
-    Idempotent (checks by name before creating), so it is safe on every startup.
-    Note a vector search index builds *asynchronously* on Atlas: it may take a
-    short while after creation before queries can use it.
+    Idempotent and drift-correcting: if the index is missing it's created; if it
+    exists but its definition no longer matches ``build_vector_index_definition``
+    (e.g. a new ``filter`` field was added in code), it is dropped and recreated.
+    This is why a definition change doesn't need a *manual* drop/recreate — an
+    earlier version skipped purely by name, which left a stale index behind. Drop
+    + recreate (rather than ``update_search_index``) is used because updating a
+    ``vectorSearch`` index is rejected as a text index on some Atlas builds; the
+    index is derived from the collection, so nothing is lost — search is only
+    briefly unavailable while it rebuilds, exactly as on a first create. Note a
+    vector index builds *asynchronously* on Atlas: it may take a short while after
+    create before queries can use the new definition.
     """
     collection = db[chunk_model.COLLECTION_NAME]
     dimensions = get_settings().embedding_dimensions
+    desired = chunk_model.build_vector_index_definition(dimensions)
+    name = chunk_model.VECTOR_INDEX_NAME
     try:
         # list_search_indexes() is a coroutine returning the cursor — await it
         # first, then iterate the cursor.
         cursor = await collection.list_search_indexes()
-        existing = [idx["name"] async for idx in cursor]
-        if chunk_model.VECTOR_INDEX_NAME in existing:
-            return
-        await collection.create_search_index(
-            SearchIndexModel(
-                definition=chunk_model.build_vector_index_definition(dimensions),
-                name=chunk_model.VECTOR_INDEX_NAME,
-                type="vectorSearch",
+        # Newer servers report the live definition as `latestDefinition`; older
+        # ones as `definition`. Fall back so drift detection works on both.
+        current = {
+            idx["name"]: idx.get("latestDefinition") or idx.get("definition")
+            async for idx in cursor
+        }
+
+        if name in current:
+            if _vector_index_matches(current[name], desired):
+                return
+            # Definition drifted (code changed the fields). Drop it, then let the
+            # create below rebuild it under the same name.
+            await collection.drop_search_index(name)
+            await _wait_until_search_index_absent(collection, name)
+            logger.info(
+                "dropped drifted chunks vector search index for rebuild",
+                extra={"index": name},
             )
+
+        await collection.create_search_index(
+            SearchIndexModel(definition=desired, name=name, type="vectorSearch")
         )
         logger.info(
             "created chunks vector search index",
-            extra={"index": chunk_model.VECTOR_INDEX_NAME, "dimensions": dimensions},
+            extra={"index": name, "dimensions": dimensions},
         )
     except Exception as exc:
         # Never fail startup over this. Catch broadly: a server without Atlas

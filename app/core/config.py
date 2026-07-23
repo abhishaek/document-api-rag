@@ -72,6 +72,18 @@ class Settings(BaseSettings):
     embedding_max_retries: int = 3
     embedding_timeout_seconds: float = 30.0
 
+    # --- Retrieval (vector search) ---
+    # How many chunks a search returns by default, and the hard ceiling a caller
+    # may ask for. The ceiling stops a client from requesting an unbounded result
+    # set (each chunk carries its text, so the response size is real).
+    search_default_limit: int = 5
+    search_max_limit: int = 20
+    # $vectorSearch explores `numCandidates` graph nodes before returning `limit`
+    # results — the HNSW recall/latency knob. More candidates = better recall,
+    # slightly more work. We derive it as limit * this multiplier (a common rule
+    # of thumb is 10-20x), capped by Atlas's 10,000 ceiling in the service.
+    search_num_candidates_multiplier: int = 15
+
     # --- Ingestion recovery ---
     # On startup the app re-runs documents left `failed` or stuck `processing`
     # (e.g. a crash mid-ingest, or a config fix like adding the API key), so a

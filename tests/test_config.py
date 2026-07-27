@@ -83,8 +83,8 @@ def test_chunking_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SECRET_KEY", "test-secret")
     for var in ("CHUNK_SIZE", "CHUNK_OVERLAP"):
         monkeypatch.delenv(var, raising=False)
-    assert Settings(_env_file=None).chunk_size == 2000
-    assert Settings(_env_file=None).chunk_overlap == 200
+    assert Settings(_env_file=None).chunk_size == 1200
+    assert Settings(_env_file=None).chunk_overlap == 150
 
     monkeypatch.setenv("CHUNK_SIZE", "1500")
     monkeypatch.setenv("CHUNK_OVERLAP", "150")

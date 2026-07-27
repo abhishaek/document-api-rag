@@ -12,6 +12,7 @@ index** over ``embedding`` is a separate, Atlas-specific mechanism added in step
 5b — it is not one of the ``create_index`` specs here.
 """
 
+import hashlib
 from datetime import datetime
 
 from bson import ObjectId
@@ -22,12 +23,49 @@ COLLECTION_NAME = "chunks"
 IndexSpec = tuple[str | list[tuple[str, int]], dict]
 
 
+def build_chunk_id(
+    user_id: ObjectId | str,
+    document_id: ObjectId | str,
+    text: str,
+    occurrence: int,
+) -> str:
+    """Deterministic, **position-independent** primary key (``_id``) for a chunk.
+
+    Derived from the chunk's *content*, not its position, so a chunk keeps the same
+    id even when earlier edits shift it to a different ``chunk_index``. That is what
+    lets the incremental sync recognize an unchanged chunk after an in-place
+    document edit and skip re-embedding it. A citation can likewise reference a
+    chunk by an id that survives a reprocess as long as the text is unchanged.
+
+    The payload mixes four fields, each load-bearing:
+
+    * ``user_id`` — namespaces one tenant's ids away from another's;
+    * ``document_id`` — namespaces one document's chunks from another's;
+    * ``content_hash`` — makes the id content-addressed: an edited chunk gets a
+      fresh id, an unchanged one keeps its id regardless of where it now sits;
+    * ``occurrence`` — disambiguates the rare case of two chunks with *identical*
+      text in one document (overlap and un-stripped boilerplate make it real).
+      It is the 0-based count of earlier identical-text chunks, so two copies get
+      distinct ids and neither is lost. Position is deliberately absent — the only
+      thing that renumbers occurrences is adding/removing a *duplicate* of the same
+      text, not moving unrelated chunks around.
+
+    SHA-256 throughout (not MD5) for consistency with the document content hash in
+    ``storage_service`` and to avoid mixing a second, weaker digest.
+    """
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    payload = f"{user_id}:{document_id}:{content_hash}:{occurrence}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class ChunkDocument(BaseModel):
     """Shape of a document in the ``chunks`` collection."""
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
-    id: ObjectId | None = Field(default=None, alias="_id")
+    # Deterministic content-addressed id (see build_chunk_id), not an ObjectId:
+    # a hex SHA-256 digest, so re-ingesting identical content reproduces it.
+    id: str | None = Field(default=None, alias="_id")
     # The parent document (foreign key to documents._id). Every read and the
     # idempotent re-ingest delete filter on this.
     document_id: ObjectId
@@ -92,11 +130,15 @@ def build_vector_index_definition(dimensions: int, similarity: str = "cosine") -
 
 
 CHUNKS_INDEXES: list[IndexSpec] = [
-    # A document's chunks are replaced wholesale on re-ingest (delete-by-document
-    # then insert), and read back in order — both filter on document_id. Making
-    # (document_id, chunk_index) unique also guarantees no duplicate positions
-    # survive a re-ingest race.
-    ([("document_id", 1), ("chunk_index", 1)], {"unique": True}),
+    # A document's chunks are read back in order and reconciled per document — both
+    # filter on document_id. NOT unique on (document_id, chunk_index): the
+    # content-addressed _id is the real key, and chunk_index is a *mutable* ordering
+    # attribute the incremental sync rewrites when a chunk moves (an in-place edit
+    # shifts positions). A unique constraint would fight those position updates —
+    # uniqueness of a chunk is already guaranteed by its _id. Kept as a plain
+    # compound index for ordered reads. (The startup schema check relaxes a
+    # pre-existing unique index of the same shape to this — see _ensure_index.)
+    ([("document_id", 1), ("chunk_index", 1)], {}),
     # Tenant scoping for search and cleanup.
     ("user_id", {}),
 ]

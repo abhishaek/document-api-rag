@@ -67,6 +67,42 @@ async def connect_to_mongo(settings: Settings) -> None:
     await _ensure_schema()
 
 
+def _index_key(field: str | list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """The (field, direction) key list an index spec compiles to, as
+    ``index_information`` reports it. A bare field name is an ascending index."""
+    if isinstance(field, str):
+        return [(field, 1)]
+    return [tuple(pair) for pair in field]
+
+
+async def _ensure_index(collection, field: str | list[tuple[str, int]], options: dict) -> None:
+    """Create an index, first relaxing/tightening its ``unique`` option if a same-
+    key index already exists with a different one.
+
+    ``create_index`` is a no-op when an identical index already exists, but it
+    *raises* when an index with the same key exists with conflicting options — so
+    changing ``(document_id, chunk_index)`` from unique to non-unique on a database
+    that already has the old index would crash startup. Detect that one case and
+    drop the stale index first so the create below succeeds. Only the ``unique``
+    flag is reconciled; every other option keeps the additive behaviour.
+    """
+    desired_key = _index_key(field)
+    desired_unique = bool(options.get("unique", False))
+    info = await collection.index_information()
+    for existing_name, spec in info.items():
+        if existing_name == "_id_":
+            continue
+        existing_key = [tuple(pair) for pair in spec.get("key", [])]
+        if existing_key == desired_key and bool(spec.get("unique", False)) != desired_unique:
+            await collection.drop_index(existing_name)
+            logger.info(
+                "relaxed index unique option to match code",
+                extra={"index": existing_name, "unique": desired_unique},
+            )
+            break
+    await collection.create_index(field, **options)
+
+
 async def _ensure_collection(
     db: AsyncDatabase,
     name: str,
@@ -78,7 +114,9 @@ async def _ensure_collection(
 
     Idempotent, but **additive** for indexes: an index that is no longer declared
     is not dropped. Removing one from a model therefore leaves it in place until
-    it is dropped by hand — including in production.
+    it is dropped by hand — including in production. The one exception is a
+    same-key index whose ``unique`` option changed, which ``_ensure_index``
+    reconciles.
     """
     existing = await db.list_collection_names()
     if name not in existing:
@@ -86,7 +124,7 @@ async def _ensure_collection(
     else:
         await db.command("collMod", name, validator=validator)
     for field, options in indexes:
-        await db[name].create_index(field, **options)
+        await _ensure_index(db[name], field, options)
 
 
 def _vector_index_matches(existing_def: dict | None, desired_def: dict) -> bool:

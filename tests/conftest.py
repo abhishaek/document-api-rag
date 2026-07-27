@@ -71,8 +71,12 @@ class FakeCollection:
                 return doc
         return None
 
-    def find(self, query: dict) -> "FakeCursor":
-        """Return a cursor over every matching doc (list_documents uses this)."""
+    def find(self, query: dict, projection: dict | None = None) -> "FakeCursor":
+        """Return a cursor over every matching doc (list_documents uses this).
+
+        ``projection`` is accepted for parity with the real driver (the chunk
+        sync reads only ``_id`` to avoid pulling every embedding) but the fake
+        returns whole docs — callers just read the fields they asked for."""
         return FakeCursor([doc for doc in self.docs if self._matches(doc, query)])
 
     async def delete_one(self, query: dict):

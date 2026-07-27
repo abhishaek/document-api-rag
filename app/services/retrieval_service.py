@@ -36,7 +36,7 @@ settings = get_settings()
 _MAX_NUM_CANDIDATES = 10_000
 
 
-def _resolve_limit(limit: int | None) -> int:
+def _resolve_limit(limit: int | None) -> int: # type: ignore
     """Clamp the requested limit into [1, search_max_limit], defaulting when None.
 
     Done in the service (not only the schema) because the service is also called

@@ -32,8 +32,9 @@ from pymongo.asynchronous.database import AsyncDatabase
 from app.core.config import get_settings
 from app.models.document import COLLECTION_NAME
 from app.schemas.document import DocumentStatus
-from app.services.chunk_storage_service import replace_document_chunks
+from app.services.chunk_storage_service import sync_document_chunks
 from app.services.chunking_service import chunk_markdown
+from app.services.cleaning_service import clean_markdown
 from app.services.document_service import (
     claim_document_for_processing,
     get_document_record,
@@ -75,20 +76,29 @@ async def process_document(
         markdown = await parse_to_markdown(
             raw, record["mime_type"], record["original_filename"]
         )
+        # Strip document boilerplate (TOC, running headers/footers, page numbers)
+        # before chunking so it never becomes a chunk of its own or dilutes one.
+        markdown = clean_markdown(markdown)
         chunks = chunk_markdown(
             markdown, chunk_size=settings.chunk_size, overlap=settings.chunk_overlap
         )
-        # Embed everything before writing, so a failure mid-embedding leaves the
-        # existing chunks (if any) intact rather than half-replaced.
-        embeddings = await embedder.embed_documents(chunks)
-        await replace_document_chunks(
-            db, record["_id"], record["user_id"], chunks, embeddings
+        # Reconcile the stored chunks to this set, embedding only the new/changed
+        # ones (a recovery re-run of an unchanged document re-embeds nothing).
+        # Embedding happens before any write inside the sync, so a failure there
+        # leaves the existing chunks intact rather than half-replaced.
+        sync = await sync_document_chunks(
+            db, record["_id"], record["user_id"], chunks, embedder
         )
 
         await set_document_status(db, document_id, DocumentStatus.ready)
         logger.info(
             "ingestion complete",
-            extra={"document_id": document_id, "chunk_count": len(chunks)},
+            extra={
+                "document_id": document_id,
+                "chunk_count": sync.total,
+                "embedded": sync.embedded,
+                "reused": sync.reused,
+            },
         )
     except Exception as exc:
         # Any failure — a missing blob, an unparseable document, (later) an

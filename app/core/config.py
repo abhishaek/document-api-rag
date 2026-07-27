@@ -97,8 +97,11 @@ class Settings(BaseSettings):
     # config because they're a primary lever on retrieval quality — tunable per
     # corpus without a code change. The chunker requires overlap < size; the
     # validator below enforces that at startup rather than at ingestion time.
-    chunk_size: int = 2000
-    chunk_overlap: int = 200
+    # ~1200 chars (~300 tokens) keeps a chunk topically focused so its vector
+    # matches sharply; larger windows tend to average adjacent sections together
+    # and blur retrieval (see chunking_service for the boundary hierarchy).
+    chunk_size: int = 1200
+    chunk_overlap: int = 150
 
     # --- Logging ---
     # LOG_LEVEL: DEBUG | INFO | WARNING | ERROR | CRITICAL

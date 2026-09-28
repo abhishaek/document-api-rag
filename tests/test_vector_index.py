@@ -1,16 +1,27 @@
-"""Tests for the chunks vector search index (app/db/mongodb._ensure_vector_index).
+"""Tests for the two chunks search indexes (app/db/mongodb).
+
+Two Atlas Search indexes back retrieval: the vector one over ``embedding`` (dense
+leg) and the lexical one over ``text`` (BM25 leg of hybrid search). Both go through
+the same ``_ensure_search_index`` machinery, so both are covered here.
 
 The Atlas Search index API needs a real Atlas server, which unit tests don't have,
 so a fake collection stands in. What's covered is *our* logic: build the right
-definition, create the index only when missing, and never crash startup when the
-server doesn't support vector search.
+definition, create an index only when missing, rebuild it when the definition
+drifted, and never crash startup when the server doesn't support Atlas Search.
 """
 
 from pymongo.errors import OperationFailure
 
-from app.db.mongodb import _ensure_vector_index, _vector_index_matches
+from app.db.mongodb import (
+    _ensure_text_index,
+    _ensure_vector_index,
+    _text_index_matches,
+    _vector_index_matches,
+)
 from app.models.chunk import (
+    TEXT_INDEX_NAME,
     VECTOR_INDEX_NAME,
+    build_text_index_definition,
     build_vector_index_definition,
 )
 
@@ -159,3 +170,119 @@ async def test_best_effort_when_server_lacks_vector_search():
 
     assert collection.created == []
     assert collection.dropped == []
+
+
+# --- The lexical (BM25) index backing hybrid search ---------------------------
+
+_TEXT_DEF = build_text_index_definition()
+# A pre-drift definition: an index built before document_id was a filterable
+# field, so a single-document hybrid search couldn't be scoped inside the search.
+_STALE_TEXT_DEF = {
+    "mappings": {
+        "dynamic": False,
+        "fields": {
+            "text": {"type": "string", "analyzer": "lucene.standard"},
+            "user_id": {"type": "objectId"},
+        },
+    }
+}
+
+
+def test_build_text_index_definition():
+    """`text` is analyzed for BM25; the two scope fields are objectId so they can
+    be used in a compound.filter `equals` clause *inside* the search."""
+    assert _TEXT_DEF == {
+        "mappings": {
+            "dynamic": False,
+            "fields": {
+                "text": {"type": "string", "analyzer": "lucene.standard"},
+                "user_id": {"type": "objectId"},
+                "document_id": {"type": "objectId"},
+            },
+        }
+    }
+
+
+def test_text_index_does_not_map_the_embedding():
+    """dynamic:False is load-bearing — dynamic mapping would index the 1024-float
+    embedding into a lexical index that can never match on it."""
+    mappings = _TEXT_DEF["mappings"]
+
+    assert mappings["dynamic"] is False
+    assert "embedding" not in mappings["fields"]
+
+
+def test_text_index_matches_ignores_atlas_defaults():
+    """Atlas echoes a string field back stuffed with its own defaults. If those
+    counted as drift, a healthy index would be dropped and rebuilt every startup."""
+    echoed = build_text_index_definition()
+    echoed["mappings"]["fields"]["text"].update({"indexOptions": "offsets", "norms": "include"})
+
+    assert _text_index_matches(echoed, _TEXT_DEF)
+
+
+def test_text_index_matches_detects_missing_field():
+    """Dropping a mapped field is real drift and must be detected."""
+    assert not _text_index_matches(_STALE_TEXT_DEF, _TEXT_DEF)
+
+
+def test_text_index_matches_detects_changed_analyzer():
+    """Swapping the analyzer changes what a query matches, so it counts as drift
+    even though the field names are identical."""
+    changed = build_text_index_definition()
+    changed["mappings"]["fields"]["text"]["analyzer"] = "lucene.english"
+
+    assert not _text_index_matches(changed, _TEXT_DEF)
+
+
+async def test_creates_text_index_when_missing():
+    collection = _FakeVectorCollection(existing={})
+
+    await _ensure_text_index(_FakeDb(collection))
+
+    assert len(collection.created) == 1
+    model = collection.created[0]
+    assert model.document["name"] == TEXT_INDEX_NAME
+    # type "search", not "vectorSearch" — a different Atlas index kind entirely.
+    assert model.document["type"] == "search"
+    assert model.document["definition"] == _TEXT_DEF
+
+
+async def test_skips_text_index_when_definition_matches():
+    collection = _FakeVectorCollection(existing={TEXT_INDEX_NAME: _TEXT_DEF})
+
+    await _ensure_text_index(_FakeDb(collection))
+
+    assert collection.created == []
+    assert collection.dropped == []
+
+
+async def test_recreates_text_index_when_definition_drifted():
+    collection = _FakeVectorCollection(existing={TEXT_INDEX_NAME: _STALE_TEXT_DEF})
+
+    await _ensure_text_index(_FakeDb(collection))
+
+    assert collection.dropped == [TEXT_INDEX_NAME]
+    assert collection.created[0].document["definition"] == _TEXT_DEF
+
+
+async def test_text_index_best_effort_when_server_lacks_atlas_search():
+    """Same contract as the vector index: a server without Atlas Search must not
+    take startup down — the app still ingests, only search is unavailable."""
+    collection = _FakeVectorCollection(list_raises=OperationFailure("no such command"))
+
+    await _ensure_text_index(_FakeDb(collection))  # must not raise
+
+    assert collection.created == []
+
+
+async def test_the_two_indexes_are_independent():
+    """An existing vector index doesn't satisfy the text index (or vice versa) —
+    they're separate Atlas indexes and hybrid search needs both present."""
+    collection = _FakeVectorCollection(existing={VECTOR_INDEX_NAME: _CURRENT_DEF})
+
+    await _ensure_vector_index(_FakeDb(collection))
+    await _ensure_text_index(_FakeDb(collection))
+
+    created = [m.document["name"] for m in collection.created]
+    assert created == [TEXT_INDEX_NAME]

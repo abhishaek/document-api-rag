@@ -101,3 +101,54 @@ def test_chunk_overlap_must_be_smaller_than_size(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_hybrid_search_defaults(monkeypatch: pytest.MonkeyPatch):
+    """Retrieval defaults to hybrid with unweighted RRF (k=60, equal leg weights)."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    for var in (
+        "SEARCH_DEFAULT_MODE",
+        "SEARCH_RRF_K",
+        "SEARCH_VECTOR_WEIGHT",
+        "SEARCH_TEXT_WEIGHT",
+        "SEARCH_FETCH_MULTIPLIER",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    settings = Settings(_env_file=None)
+
+    assert settings.search_default_mode == "hybrid"
+    assert settings.search_rrf_k == 60
+    assert settings.search_vector_weight == 1.0
+    assert settings.search_text_weight == 1.0
+    assert settings.search_fetch_multiplier == 4
+
+
+def test_hybrid_search_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch):
+    """The RRF knobs are tunable per deployment without a code change — that's the
+    whole reason they're config and not constants."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.setenv("SEARCH_DEFAULT_MODE", "vector")
+    monkeypatch.setenv("SEARCH_RRF_K", "20")
+    monkeypatch.setenv("SEARCH_VECTOR_WEIGHT", "0.7")
+    monkeypatch.setenv("SEARCH_TEXT_WEIGHT", "0.3")
+    monkeypatch.setenv("SEARCH_FETCH_MULTIPLIER", "10")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.search_default_mode == "vector"
+    assert settings.search_rrf_k == 20
+    assert settings.search_vector_weight == 0.7
+    assert settings.search_text_weight == 0.3
+    assert settings.search_fetch_multiplier == 10
+
+
+def test_unknown_search_mode_is_rejected(monkeypatch: pytest.MonkeyPatch):
+    """A typo'd mode must fail at startup. Left to runtime it would break every
+    search that didn't name a mode explicitly, and surface from inside retrieval
+    rather than as the config problem it is."""
+    monkeypatch.setenv("SECRET_KEY", "test-secret")
+    monkeypatch.setenv("SEARCH_DEFAULT_MODE", "semantic")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

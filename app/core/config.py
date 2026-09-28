@@ -84,6 +84,38 @@ class Settings(BaseSettings):
     # of thumb is 10-20x), capped by Atlas's 10,000 ceiling in the service.
     search_num_candidates_multiplier: int = 15
 
+    # --- Retrieval (hybrid search / RRF) ---
+    # Which retrieval strategy a search uses when the request doesn't ask for one:
+    #   "vector" — dense only ($vectorSearch). Best on paraphrase, blind to rare
+    #              literal tokens (product names, error codes, version numbers),
+    #              because a 1024-float average of a whole chunk doesn't preserve
+    #              that a term appeared once.
+    #   "text"   — lexical only ($search / BM25). The mirror image. Kept mainly so
+    #              an eval can measure one leg against the other.
+    #   "hybrid" — both legs fused with RRF (below). The default: either signal
+    #              alone can surface a chunk, and agreement between them compounds.
+    # Hybrid needs the chunks *text* search index to exist; on a server without
+    # Atlas Search neither index is created and no mode works anyway (see
+    # app.db.mongodb._ensure_text_index).
+    search_default_mode: str = "hybrid"
+    # Reciprocal Rank Fusion: score = sum over legs of weight / (k + rank).
+    # Fusion is on *rank*, never on raw score, because the two legs' scores aren't
+    # comparable — vectorSearchScore is cosine in ~[0,1], searchScore is raw BM25
+    # (unbounded, corpus- and query-dependent). k dampens how much the very top
+    # ranks dominate; 60 is the value from the original RRF paper and the usual
+    # default. Larger k = flatter contribution across ranks.
+    search_rrf_k: int = 60
+    # Per-leg weights. Equal (1.0/1.0) is unweighted RRF — the honest default
+    # before an eval set exists. Raise the vector weight for conceptual corpora,
+    # the text weight for corpora full of identifiers and exact terminology.
+    search_vector_weight: float = 1.0
+    search_text_weight: float = 1.0
+    # How many candidates each leg fetches before fusion, as a multiple of the
+    # requested limit. Fusion can only reorder what the legs handed it — a chunk
+    # outside both legs' fetch window can never surface — so this is over-fetched
+    # well past the final limit. 4x (limit 5 -> 20 per leg) is a reasonable start.
+    search_fetch_multiplier: int = 4
+
     # --- Ingestion recovery ---
     # On startup the app re-runs documents left `failed` or stuck `processing`
     # (e.g. a crash mid-ingest, or a config fix like adding the API key), so a
@@ -126,6 +158,22 @@ class Settings(BaseSettings):
         if size is not None and value >= size:
             raise ValueError(
                 f"CHUNK_OVERLAP ({value}) must be smaller than CHUNK_SIZE ({size})"
+            )
+        return value
+
+    @field_validator("search_default_mode")
+    @classmethod
+    def _known_search_mode(cls, value: str) -> str:
+        """Reject an unknown mode at startup rather than on the first search.
+
+        The service falls back to this value whenever a request doesn't name a
+        mode, so a typo here would break every default search — and would surface
+        as a runtime error deep in retrieval, not as a config problem.
+        """
+        allowed = {"vector", "text", "hybrid"}
+        if value not in allowed:
+            raise ValueError(
+                f"SEARCH_DEFAULT_MODE ({value!r}) must be one of {sorted(allowed)}"
             )
         return value
 

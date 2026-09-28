@@ -129,6 +129,48 @@ def build_vector_index_definition(dimensions: int, similarity: str = "cosine") -
     }
 
 
+# The Atlas Search (lexical/BM25) index over `text`. The *second* leg of hybrid
+# search, and a sibling to VECTOR_INDEX_NAME above: same Atlas Search index API,
+# but type "search" rather than "vectorSearch". Two separate indexes, not one —
+# Atlas has no single index serving both $vectorSearch and $search.
+TEXT_INDEX_NAME = "chunks_text_index"
+
+
+def build_text_index_definition() -> dict:
+    """The Atlas Search index definition backing the lexical leg of hybrid search.
+
+    Where the vector index matches on *meaning*, this one matches on *terms*: BM25
+    over the analyzed tokens of ``text``, which is what rescues the queries dense
+    retrieval is worst at — product names, error codes, version numbers, acronyms.
+    An embedding averages a whole 1200-char chunk into 1024 floats and loses the
+    fact that a rare token appeared once; an inverted index does not.
+
+    ``dynamic: False`` maps only the fields we name. Deliberate: dynamic mapping
+    would also index ``embedding``, ballooning the index with 1024 numbers per
+    chunk that no lexical query will ever match.
+
+    ``lucene.standard`` is the analyzer — Unicode word breaks and lowercasing, no
+    stemming or stopword removal. Conservative on purpose for a technical corpus,
+    where stemming can merge terms that should stay distinct.
+
+    ``user_id`` and ``document_id`` are mapped as ``objectId`` so they can be used
+    in a ``compound.filter`` ``equals`` clause *inside* the search. This is the
+    same scoping requirement the vector index's ``filter`` fields exist for, and
+    for the same reason: a post-``$match`` would run after the leg's ``$limit``
+    had already been spent, silently dropping the caller's own results.
+    """
+    return {
+        "mappings": {
+            "dynamic": False,
+            "fields": {
+                "text": {"type": "string", "analyzer": "lucene.standard"},
+                "user_id": {"type": "objectId"},
+                "document_id": {"type": "objectId"},
+            },
+        }
+    }
+
+
 CHUNKS_INDEXES: list[IndexSpec] = [
     # A document's chunks are read back in order and reconciled per document — both
     # filter on document_id. NOT unique on (document_id, chunk_index): the

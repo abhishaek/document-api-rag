@@ -5,6 +5,8 @@ Search is a JSON POST (not multipart like upload), so unlike ``document.py`` it
 as JSON; the response is a ranked list of chunks with their similarity scores.
 """
 
+from typing import Literal
+
 from bson import ObjectId
 from pydantic import BaseModel, Field, field_validator
 
@@ -35,6 +37,13 @@ class SearchRequest(BaseModel):
         default=None,
         description="Restrict the search to a single document. Omit to search all.",
     )
+    mode: Literal["vector", "text", "hybrid"] | None = Field(
+        default=None,
+        description=(
+            "Retrieval strategy: 'vector' (dense/semantic), 'text' (BM25/lexical), "
+            "or 'hybrid' (both, fused with RRF). Defaults to the server's setting."
+        ),
+    )
 
     @field_validator("document_id")
     @classmethod
@@ -49,10 +58,25 @@ class SearchRequest(BaseModel):
 class SearchResult(BaseModel):
     """One matched chunk, with how well it matched.
 
-    ``score`` is Atlas's ``vectorSearchScore`` for cosine similarity — higher is
-    a closer match, in roughly [0, 1]. ``document_id`` and ``chunk_index`` let a
-    caller trace a result back to its source document and position (the
-    groundwork the citation work in a later phase builds on).
+    ``score`` is the ranking score, and **what it means depends on the mode**:
+
+    * ``vector`` — Atlas's ``vectorSearchScore``: cosine similarity, roughly [0, 1].
+    * ``text`` — Atlas's ``searchScore``: raw BM25, unbounded and comparable only
+      within one query's results.
+    * ``hybrid`` — the fused RRF score, ``sum of weight / (k + rank)`` over the two
+      legs. With the default k=60 these are small numbers (~0.016 for a top hit)
+      and are meaningful only as an *ordering* — they are not a similarity.
+
+    ``vector_score`` and ``text_score`` are populated in hybrid mode only: each
+    leg's own native score, carried through for inspection. They take no part in
+    the ranking (that is the point of fusing on rank), but they show which leg
+    found a chunk — a null ``text_score`` means only the dense leg retrieved it,
+    and vice versa. In single-leg modes they stay null, because the one score
+    there is already ``score``.
+
+    ``document_id`` and ``chunk_index`` let a caller trace a result back to its
+    source document and position (the groundwork the citation work in a later
+    phase builds on).
     """
 
     id: str
@@ -60,10 +84,19 @@ class SearchResult(BaseModel):
     chunk_index: int
     text: str
     score: float
+    vector_score: float | None = None
+    text_score: float | None = None
 
 
 class SearchResponse(BaseModel):
-    """The ranked results for one query, most similar first."""
+    """The ranked results for one query, best match first.
+
+    ``mode`` echoes the strategy that actually ran — the request's, or the
+    server default when the request didn't name one. Without it a caller relying
+    on the default can't tell how to read ``score`` (see ``SearchResult``), and an
+    eval comparing strategies can't label its runs.
+    """
 
     query: str
+    mode: str
     results: list[SearchResult]

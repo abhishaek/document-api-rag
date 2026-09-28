@@ -168,30 +168,64 @@ async def _wait_until_search_index_absent(
         await asyncio.sleep(delay)
 
 
-async def _ensure_vector_index(db: AsyncDatabase) -> None:
-    """Create *or update* the chunks vector search index so it matches the code.
+def _text_index_matches(existing_def: dict | None, desired_def: dict) -> bool:
+    """Whether an existing Atlas Search (lexical) index already matches the desired one.
+
+    Same contract as ``_vector_index_matches``, applied to the other index shape:
+    compare only what *we* declare — ``dynamic``, and each mapped field's name,
+    ``type`` and ``analyzer``. Atlas fills a string field in with a pile of its own
+    defaults (``indexOptions``, ``store``, ``norms``, …) and echoes them back; if
+    those counted, a healthy index would look drifted and be rebuilt on every
+    single startup. A change that matters — a field added or dropped, a type or
+    analyzer changed — still alters this set and is caught.
+    """
+
+    def mapped_fields(definition: dict | None) -> set[tuple]:
+        mappings = (definition or {}).get("mappings", {})
+        return {
+            (name, spec.get("type"), spec.get("analyzer"))
+            for name, spec in (mappings.get("fields") or {}).items()
+        }
+
+    existing_dynamic = ((existing_def or {}).get("mappings") or {}).get("dynamic", False)
+    desired_dynamic = (desired_def.get("mappings") or {}).get("dynamic", False)
+    return existing_dynamic == desired_dynamic and mapped_fields(existing_def) == mapped_fields(
+        desired_def
+    )
+
+
+async def _ensure_search_index(
+    db: AsyncDatabase,
+    name: str,
+    desired: dict,
+    index_type: str,
+    matches,
+    log_extra: dict | None = None,
+) -> None:
+    """Create *or update* one Atlas Search index over ``chunks`` so it matches the code.
+
+    Shared by the vector index and the lexical (hybrid) one — they differ only in
+    their definition shape, their ``type``, and how drift is compared, all passed
+    in. ``matches`` is the definition comparator for this index type.
 
     Best-effort: the Atlas Search index API only exists on Atlas (Cloud or the
     Atlas Local Docker image). On a server without it this logs a warning and
     returns rather than failing startup — the app still ingests and stores chunks;
-    only vector *search* is unavailable until the index exists.
+    only *search* is unavailable until the index exists.
 
     Idempotent and drift-correcting: if the index is missing it's created; if it
-    exists but its definition no longer matches ``build_vector_index_definition``
-    (e.g. a new ``filter`` field was added in code), it is dropped and recreated.
-    This is why a definition change doesn't need a *manual* drop/recreate — an
-    earlier version skipped purely by name, which left a stale index behind. Drop
-    + recreate (rather than ``update_search_index``) is used because updating a
-    ``vectorSearch`` index is rejected as a text index on some Atlas builds; the
-    index is derived from the collection, so nothing is lost — search is only
-    briefly unavailable while it rebuilds, exactly as on a first create. Note a
-    vector index builds *asynchronously* on Atlas: it may take a short while after
-    create before queries can use the new definition.
+    exists but its definition no longer matches the builder in ``app.models.chunk``
+    (e.g. a new filter field was added in code), it is dropped and recreated. This
+    is why a definition change doesn't need a *manual* drop/recreate — an earlier
+    version skipped purely by name, which left a stale index behind. Drop + recreate
+    (rather than ``update_search_index``) is used because updating a ``vectorSearch``
+    index is rejected as a text index on some Atlas builds; the index is derived
+    from the collection, so nothing is lost — search is only briefly unavailable
+    while it rebuilds, exactly as on a first create. Note a search index builds
+    *asynchronously* on Atlas: it may take a short while after create before queries
+    can use the new definition.
     """
     collection = db[chunk_model.COLLECTION_NAME]
-    dimensions = get_settings().embedding_dimensions
-    desired = chunk_model.build_vector_index_definition(dimensions)
-    name = chunk_model.VECTOR_INDEX_NAME
     try:
         # list_search_indexes() is a coroutine returning the cursor — await it
         # first, then iterate the cursor.
@@ -204,33 +238,69 @@ async def _ensure_vector_index(db: AsyncDatabase) -> None:
         }
 
         if name in current:
-            if _vector_index_matches(current[name], desired):
+            if matches(current[name], desired):
                 return
             # Definition drifted (code changed the fields). Drop it, then let the
             # create below rebuild it under the same name.
             await collection.drop_search_index(name)
             await _wait_until_search_index_absent(collection, name)
             logger.info(
-                "dropped drifted chunks vector search index for rebuild",
-                extra={"index": name},
+                "dropped drifted chunks search index for rebuild",
+                extra={"index": name, "index_type": index_type},
             )
 
         await collection.create_search_index(
-            SearchIndexModel(definition=desired, name=name, type="vectorSearch")
+            SearchIndexModel(definition=desired, name=name, type=index_type)
         )
         logger.info(
-            "created chunks vector search index",
-            extra={"index": name, "dimensions": dimensions},
+            "created chunks search index",
+            extra={"index": name, "index_type": index_type, **(log_extra or {})},
         )
     except Exception as exc:
         # Never fail startup over this. Catch broadly: a server without Atlas
         # Search may reject anywhere from the command to the cursor, surfacing
         # different error types across driver/server versions.
         logger.warning(
-            "skipping chunks vector search index (server may not support Atlas "
-            "Vector Search); vector search stays unavailable until it exists",
+            "skipping chunks %s search index (server may not support Atlas Search); "
+            "searches needing it stay unavailable until it exists",
+            index_type,
             exc_info=exc,
         )
+
+
+async def _ensure_vector_index(db: AsyncDatabase) -> None:
+    """Ensure the ``chunks`` vector search index — the dense leg of retrieval."""
+    dimensions = get_settings().embedding_dimensions
+    await _ensure_search_index(
+        db,
+        chunk_model.VECTOR_INDEX_NAME,
+        chunk_model.build_vector_index_definition(dimensions),
+        "vectorSearch",
+        _vector_index_matches,
+        log_extra={"dimensions": dimensions},
+    )
+
+
+async def _ensure_text_index(db: AsyncDatabase) -> None:
+    """Ensure the ``chunks`` lexical search index — the BM25 leg of hybrid search.
+
+    Created unconditionally rather than only when ``search_default_mode`` is
+    hybrid: a search index builds asynchronously and can take a while to become
+    queryable, so having it already present means flipping the mode (globally, or
+    per request) takes effect immediately instead of returning nothing until the
+    index catches up.
+
+    Unlike the vector index this one needs **no re-ingestion**. It indexes the
+    ``text`` field already stored on every chunk, so existing documents become
+    lexically searchable as soon as the index finishes building.
+    """
+    await _ensure_search_index(
+        db,
+        chunk_model.TEXT_INDEX_NAME,
+        chunk_model.build_text_index_definition(),
+        "search",
+        _text_index_matches,
+    )
 
 
 async def _ensure_schema() -> None:
@@ -268,8 +338,11 @@ async def _ensure_schema() -> None:
         chunk_model.CHUNKS_VALIDATOR,
         chunk_model.CHUNKS_INDEXES,
     )
-    # The chunks collection must exist before its search index can be created.
+    # The chunks collection must exist before its search indexes can be created.
+    # Two of them: the dense vector index and the lexical one hybrid search fuses
+    # with it (see app.services.retrieval_service).
     await _ensure_vector_index(db)
+    await _ensure_text_index(db)
 
     logger.info("ensured mongodb schema and indexes")
 

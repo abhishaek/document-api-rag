@@ -1,10 +1,11 @@
 """Tests for the search router (app/routers/search.py).
 
 The router's own responsibilities are what's covered here: it requires auth,
-validates the request body, scopes the search to the caller, and shapes the
-response. The vector search itself is not executed — a local fake collection
-returns canned rows (ranking is proven by the Atlas Local integration test),
-because Atlas ``$vectorSearch`` can't be faithfully emulated in-memory.
+validates the request body, selects a retrieval mode, scopes the search to the
+caller, and shapes the response. The search itself is not executed — a local fake
+collection returns canned rows (ranking is proven by the Atlas Local integration
+test), because Atlas ``$vectorSearch`` and ``$search`` can't be faithfully
+emulated in-memory.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -178,6 +179,55 @@ async def test_malformed_document_id_is_rejected(search_client):
         SEARCH_URL,
         json={"query": "x", "document_id": "not-an-object-id"},
         headers=_auth(USER_A),
+    )
+
+    assert response.status_code == 422
+
+
+async def test_response_reports_the_mode_that_ran(search_client):
+    """The caller has to know which strategy produced the results: `score` means a
+    different thing in each mode (cosine vs BM25 vs a fused RRF value)."""
+    response = await search_client.post(
+        SEARCH_URL, json={"query": "x"}, headers=_auth(USER_A)
+    )
+
+    assert response.json()["mode"] == get_settings().search_default_mode
+
+
+async def test_requested_mode_reaches_the_pipeline(search_client):
+    """mode='text' must run the lexical leg only — no $vectorSearch stage at all."""
+    response = await search_client.post(
+        SEARCH_URL, json={"query": "lambda", "mode": "text"}, headers=_auth(USER_A)
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "text"
+    pipeline = search_client.chunks.pipeline
+    assert "$search" in pipeline[0]
+    assert not any("$vectorSearch" in stage for stage in pipeline)
+
+
+async def test_hybrid_mode_runs_both_legs_scoped_to_the_caller(search_client):
+    """Both legs must carry the tenant scope inside the search — a leg left open
+    would feed another tenant's chunks into the fusion."""
+    response = await search_client.post(
+        SEARCH_URL, json={"query": "lambda", "mode": "hybrid"}, headers=_auth(USER_A)
+    )
+
+    assert response.status_code == 200
+    pipeline = search_client.chunks.pipeline
+    assert pipeline[0]["$vectorSearch"]["filter"] == {"user_id": ObjectId(USER_A)}
+    text_leg = next(s["$unionWith"] for s in pipeline if "$unionWith" in s)["pipeline"]
+    assert text_leg[0]["$search"]["compound"]["filter"] == [
+        {"equals": {"path": "user_id", "value": ObjectId(USER_A)}}
+    ]
+
+
+async def test_unknown_mode_is_rejected(search_client):
+    """An unknown mode is a 422 about the request at the boundary, never a
+    ValueError surfacing as a 500 from inside the service."""
+    response = await search_client.post(
+        SEARCH_URL, json={"query": "x", "mode": "semantic"}, headers=_auth(USER_A)
     )
 
     assert response.status_code == 422
